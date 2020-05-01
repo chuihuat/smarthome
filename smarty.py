@@ -25,23 +25,22 @@ import logging
 import platform
 import subprocess
 import sys
+import os
 
-import aiy.assistant.auth_helpers
-from aiy.assistant.library import Assistant
-import aiy.audio
-import aiy.voicehat
+#import aiy.voice.voicehat
 from google.assistant.library.event import EventType
+from aiy.assistant import auth_helpers
+from aiy.assistant.library import Assistant
+from aiy.board import Board, Led
+from aiy.voice import tts
+
+from aiy.cloudspeech import CloudSpeechClient
 
 import time
 import re
 import vlc
 import youtube_dl
 import threading
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="[%(asctime)s] %(levelname)s:%(name)s:%(message)s"
-)
 
 ydl_opts = {
     'default_search': 'ytsearch1:',
@@ -55,28 +54,30 @@ vlc_instance = vlc.get_default_instance()
 vlc_player = vlc_instance.media_player_new()
 vlc_player.audio_set_volume(vlc_volume)
 
+client = CloudSpeechClient()
+
 def on_button_press():
     state = vlc_player.get_state()
     if state == vlc.State.Playing:
         vlc_player.pause()
-        aiy.audio.say('Music is paused!')
+        tts.say('Music is paused!')
     elif state == vlc.State.Paused:
-        aiy.audio.say('Music will be resumed!')
+        tts.say('Music will be resumed!')
         vlc_player.play()
 
 def power_off_pi():
-    aiy.audio.say('Good bye!')
+    tts.say('Good bye!')
     subprocess.call('sudo shutdown now', shell=True)
 
 
 def reboot_pi():
-    aiy.audio.say('See you in a bit!')
+    tts.say('See you in a bit!')
     subprocess.call('sudo reboot', shell=True)
 
 
 def say_ip():
     ip_address = subprocess.check_output("hostname -I | cut -d' ' -f1", shell=True)
-    aiy.audio.say('My IP address is %s' % ip_address.decode('utf-8'))
+    tts.say('My IP address is %s' % ip_address.decode('utf-8'))
 
 playshell = None
 vlcshell = None
@@ -85,16 +86,30 @@ def player_action(cmd):
     global vlc_volume
     if 'up' in cmd or 'louder' in cmd: 
         if vlc_volume >= 100:
-            aiy.audio.say('Volume already max!')
+            tts.say('Volume already max!')
         else:
             vlc_volume = vlc_volume + 10
     elif 'down' in cmd or 'softer' in cmd:
         if vlc_volume <= 0:
-            aiy.audio.say('Volume already off!')
+            tts.say('Volume already off!')
         else:
             vlc_volume = vlc_volume - 10
-    aiy.audio.say('Volume is ' + str(vlc_volume))
+
+    tts.say('Volume is ' + str(vlc_volume))
     vlc_player.audio_set_volume(vlc_volume)
+
+def change_volume(percentage):
+    os.system('amixer sset \'Master\' ' + percentage + '%')
+    vlc_player.audio_set_volume(int(percentage))
+    tts.say('Volume is ' + percentage + 'percent')
+
+def chinese_input():
+    text = client.recognize()
+    if not text:
+        print('Sorry, I did not hear you.')
+    else:
+        print(text)
+        play_music(text)
 
 def play_music(name):
     if vlc_player.get_state == vlc.State.Playing:
@@ -104,7 +119,7 @@ def play_music(name):
         with youtube_dl.YoutubeDL(ydl_opts) as ydl:
             meta = ydl.extract_info(name, download=False)
     except Exception:
-        aiy.audio.say('Sorry, Ican\'t find that song.')
+        tts.say('Sorry, Ican\'t find that song.')
         return
 
     if meta:
@@ -115,14 +130,12 @@ def play_music(name):
         vlc_player.play()
 
 def process_event(assistant, event):
-    status_ui = aiy.voicehat.get_status_ui()
     if event.type == EventType.ON_START_FINISHED:
-        status_ui.status('ready')
-        if sys.stdout.isatty():
-            print('Say "OK, Google" then speak, or press Ctrl+C to quit...')
+        led.state = Led.BEACON_DARK # Ready.
+        print('Say "OK, Google" then speak, or press Ctrl+C to quit...')
 
     elif event.type == EventType.ON_CONVERSATION_TURN_STARTED:
-        status_ui.status('listening')
+        led.state = Led.ON # Listening.
 
     elif event.type == EventType.ON_RECOGNIZING_SPEECH_FINISHED and event.args:
         print('You said:', event.args['text'].lower())
@@ -135,36 +148,42 @@ def process_event(assistant, event):
             assistant.stop_conversation()
             player_action(text[4:])
 
+        if text.startswith('change volume to '):
+            assistant.stop_conversation()
+            change_volume(text.split(' ')[-1])
+
+        if text.startswith('chinese input'):
+            assistant.stop_conversation()
+            tts.say('you may speak chinese now.')
+            chinese_input()
 
         elif text == 'ip address':
             assistant.stop_conversation()
             say_ip()
 
     elif event.type == EventType.ON_END_OF_UTTERANCE:
-        status_ui.status('thinking')
+        led.state = Led.PULSE_QUICK # Thinking.
 
     elif (event.type == EventType.ON_CONVERSATION_TURN_FINISHED
           or event.type == EventType.ON_CONVERSATION_TURN_TIMEOUT
           or event.type == EventType.ON_NO_RESPONSE):
-        status_ui.status('ready')
+        led.state = Led.BEACON_DARK # Ready.
 
     elif event.type == EventType.ON_ASSISTANT_ERROR and event.args and event.args['is_fatal']:
         sys.exit(1)
 
 
 def main():
-    if platform.machine() == 'armv6l':
-        print('Cannot run hotword demo on Pi Zero!')
-        exit(-1)
 
-    button = aiy.voicehat.get_button()
-    button.on_press(on_button_press)
+    logging.basicConfig(level=logging.INFO)
 
-    credentials = aiy.assistant.auth_helpers.get_assistant_credentials()
-    with Assistant(credentials) as assistant:
+#    button = aiy.voicehat.get_button()
+#    button.on_press(on_button_press)
+
+    credentials = auth_helpers.get_assistant_credentials()
+    with Board() as board, Assistant(credentials) as assistant:
         for event in assistant.start():
-            process_event(assistant, event)
-
+            process_event(assistant, board.led, event)
 
 if __name__ == '__main__':
     main()
